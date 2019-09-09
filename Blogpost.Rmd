@@ -1,0 +1,176 @@
+---
+title: "Predicting Job Interview Outcomes Using Glassdoor Reviews"
+author: "Ibukunoluwa Olushiyan"
+date: "August 16, 2019"
+output:
+  html_document: default
+---
+
+```{r echo=FALSE, message=FALSE}
+library(rmarkdown)
+library(tidyverse) #for data wrangling
+library(highcharter)
+library(ggplot2)
+library(tidyquant)
+options(warn = -1) #Suppress warnings
+new_data <- read_csv("New Data.csv")
+new_data <- new_data %>% 
+  mutate_if(is.character, as.factor)
+```
+
+<center> ![](https://images.unsplash.com/photo-1551836022-4c4c79ecde51?ixlib=rb-1.2.1&ixid=eyJhcHBfaWQiOjEyMDd9&auto=format&fit=crop&w=750&q=80) </center>
+<center>Photo by Amy Hirschi https://unsplash.com/@amyhirschi</center>
+<br>
+
+<font size="4">
+_**Caveat:** The accuracy of this analysis is as good as the accuracy of the reviews reported by the applicants on Glassdoor. Also, since these applicants would mostly likely provide the reviews on Glassdoor after completing the process, it is *very likely* knowledge of the outcome would influence how they view the entire process and in effect, their review responses._
+
+When was the last time you went for an interview feeling you killed it, but you never got the offer? If you have gone for interviews, chances are that you have had the good, the bad and the ugly. So, what could be the determinant of getting offers? Do referrals really matter? Can candidates accurately gauge how positive or negative their interview was? Which set of companies are usually harder to get into? To understand the dynamics of these, I decided to do some digging of interview reviews of top companies on [Glassdoor](https://www.glassdoor.co.uk/Interview/index.htm), a popular a job site.
+</font>
+
+#MY APPROACH
+
+<font size="4">The reviews were scrapped using the R Selenium package for 23 companies comprising of Banks, Consulting firms (MBBs - Mckinsey,Bain & BCG, big 4 - EY,Deloitte,PwC & KPMG) and a few Tech companies. This enabled me build on the web scrapping knowledge I gained from my [previous project on news headlines](https://medium.com/@AddictedReader/how-has-news-reporting-evolved-in-nigeria-558aa33b60ad). Here is what the data looks like after all of the cleaning and preprocessing had been done:</font>
+
+```{r echo=FALSE}
+knitr::kable(new_data[1:5,], caption = "Sample data")
+```
+
+<font size="4">The objective is to predict if an Applicant would get an *Offer or not* and investigate the factors that influenced this outcome based on review details such as referral source, process duration, interview difficulty, overall experience of the applicant. I did some data exploration to detect patterns in the data, then built the Machine Learning model using the R h2o package (as an R stan, this project was completed using R). </font>
+
+#INSIGHTS:
+
+## More interview candidates find the MBB process more difficult than Google's. However, the MBBs accept almost two times more candidates than Google.
+
+<font size="4">Applicant reviews showed that the MBBs have the most difficult process on the average followed by the Tech firms while Banks and the Big 4 firms have a relatively easier process. </font>
+
+```{r echo=FALSE}
+company_count <- new_data %>% 
+  count(sector,Company_name) %>%
+  rename(total = n)
+
+interview_diff <- new_data %>% 
+  filter(Interview_difficulty == "Difficult Interview") %>%
+  count(Company_name) %>%
+  rename(difficulty = n) %>%
+  inner_join(company_count, by= "Company_name") %>%
+  mutate(diff_rate = difficulty/total*100) %>% 
+  arrange(desc(diff_rate))
+
+hchart(interview_diff, "column", hcaes(x=Company_name,y=diff_rate,group=sector)) %>%
+  hc_yAxis(title = list(text = "% of people that had difficult interviews")) %>%
+  hc_title(text="Percentage Review with Difficult Interview")
+
+```
+
+<font size="4">But does this high difficulty mean the MBBs and Tech companies give lower Offers ? </font>
+
+``` {r echo=FALSE, message=FALSE}
+success_rate<- new_data %>% 
+  filter(Offer != "No Offer") %>%
+  count(Company_name) %>%
+  rename(offer = n) %>%
+  inner_join(company_count, by= "Company_name") %>%
+  mutate(offer_rate = offer/total*100) %>% 
+  arrange(desc(offer_rate))
+
+diff_vs_success <- success_rate %>%
+  select(Company_name, offer_rate, sector) %>%
+  inner_join(interview_diff %>% 
+               select(Company_name, diff_rate))
+
+highchart() %>%
+  hc_add_series_scatter(diff_vs_success$offer_rate, diff_vs_success$diff_rate,
+                        label = diff_vs_success$Company_name,
+                        dataLabels = list(enabled = TRUE, format = '{point.label}')) %>%
+  hc_tooltip(pointFormat = "{point.label}:{point.x:,.2f},{point.y:,.2f}") %>%
+  hc_title(text="Interview Difficulty vs Offer Rate")%>%
+  hc_xAxis(title = list(text = "% of people that got Offers")) %>%
+  hc_yAxis(title = list(text = "% of people that had difficult interviews"))
+
+```
+
+<font size="4">As you might have expected, the higher the difficulty, the lower the offer rate of the companies. It follows that companies with higher difficulty rate would have lower offer rates. However, taking a closer look at the chart above, you'll see the MBBs still give a lot of offers compared to Google despite their more difficult process.</font>
+
+##How you feel about the process is more important than how difficult your interview was 
+
+<font size="4">How they treated you, how you felt about the process and how you felt about your interviewers is more important than if you stuttered while answering a question or two. </font>
+
+<font size="4">A machine learning model was used to classify if a candidate will get an offer. I used an algorithm called [GBM](https://towardsdatascience.com/understanding-gradient-boosting-machines-9be756fe76ab) with a 78% accuracy and then tried to understand what variables were the most important to determine who gets an offer.</font>
+
+<font size="4">The chart below shows the variables in their order of influence for the model. Interview experience which describes how the applicant feels after the interview is by far the most important of all. But what kind of feeling guarantees an offer? </font>
+
+``` {r echo=FALSE, message=FALSE, results="hide"}
+library(h2o)
+h2o.init()
+h2o.no_progress()
+best_model <- h2o.loadModel("myGBM_Model")
+
+data_h2o <- as.h2o(select(new_data,-sector,-Company_name))
+
+splits <- h2o.splitFrame(data_h2o, ratios = c(0.6,0.2),
+                         destination_frames = c("train", "valid", "test"), seed = 1234)
+train = h2o.getFrame("train")
+
+h2o.varimp_plot(best_model) #importance of variables
+```
+
+<font size="4">I am sure you expected this! Applicants who reported positive interview experience were more successful than others with the neutral and negative experiences. However, I am sure you were not expecting that the gap would be so wide. A whooping 70% of the applicants with positive experience got offers compared to just 20-30% of applicants with neutral and negative experiences. </font>
+
+``` {r echo=FALSE, message=FALSE, results="hide"}
+h2o.partialPlot(best_model,train,"Interview_experience")
+```
+
+<font size="4">I know what you might be thinking, people that got offers and claim to have positive experiences had easier interviews right? </font>
+
+``` {r echo=FALSE, message=FALSE}
+new_data %>% 
+  add_count(Interview_difficulty) %>%
+  filter(Offer == "Offer" & Interview_experience == "Positive Experience" & !(is.na(Interview_difficulty))) %>%
+  count(Interview_difficulty) %>%
+  mutate(sorting_variable=c(2,3,1)) %>%
+  arrange(sorting_variable) %>%
+  hchart("column", hcaes(x=Interview_difficulty, y=n))
+
+```
+
+<font size="4">We would have expected that applicants with positive experience would have had easy interviews, but there are more with average experience. This then drives home the point that your feeling after the process is more important than how difficult your interview was. </font>
+
+##The odds are stacked against you when you apply Online or at a College career fair
+
+<font size="4">Next most important feature influencing getting an offer is your referral source, which is how you got in contact with the Company. </font>
+
+``` {r echo=FALSE, message=FALSE, results="hide"}
+hchart(new_data$Referral, "pie")
+```
+
+<font size="4">Most applications were initiated either online, at a College/University career fair, through an employee referral or by the company recruiter directly reaching out. </font>
+
+```{r echo=FALSE, out.width="100%"}
+referral_plot <- h2o.partialPlot(best_model,train,"Referral", plot=F) %>% as.data.frame() %>% arrange(-mean_response)
+hchart(referral_plot, "bar", hcaes(x=Referral,y=mean_response)) %>%
+  hc_title(text="Mean response for Referral sources")
+```
+
+<font size="4">Outcomes from applications you do online or through a College/University fair are much more difficult to predict because there are many out there like you and the competition is going to be stiffer. Also, it would take so much to convince the Company of your abilities compared to an applicant who got an Employee referral, for which outcomes are much more predictable and successful. Shocking for me though is that even if a recruiter reaches out to you either through your LinkedIn or your blog does not mean you would get an offer. </font>
+
+###In summary:
+
+<font size="4">
+
+* If the company likes you, chances are they would treat you well
+* A positive feeling after the interview is more important than having an easy interview
+* A good starting point could be getting an Employee referral
+* If you are applying online or at a College career fair, you would need stronger credentials than someone with an employee referral
+
+</font>
+
+##THE ROAD AHEAD
+
+<font size="4">
+
+*	Get more data features by using text analytics to work with interview questions and candidate answers
+*	Parameter tuning to further improve model performance & accuracy
+*	Build a web app where users can enter information about their interviews and get a prediction of the expected outcome
+
+</font>
